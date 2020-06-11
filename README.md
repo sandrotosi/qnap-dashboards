@@ -66,9 +66,81 @@ for my configuration i chose `TIME` to be `1095d` (3 years); restart Prometheus 
 
 #### Grafana
 
-We now have Prometheus collecting data, it's time to visualize it: Grafana will fulfill this duty.
+We now have Prometheus collecting data, it's time to visualize it: [Grafana](https://prometheus.io/docs/visualization/grafana/) will fulfill this duty.
 
 Just go to <http://nas_address:3000/> (default login is admin/admin; change the password as suggested): a new installation menu will guide you to the setup procedure, which starts with the configuration of the first datasource, which will be the Prometheus instance we just configured.
 
 Grafana doesnt come with any dashboard out of the box, but there's an active community on their [website](https://grafana.com/grafana/dashboards) from where you can import dashboards designed by others; a very good initial OS status dashboard can be found [here](https://grafana.com/grafana/dashboards/6287) which uses the data exported by `node_exporter` to populate the widgets.
 
+## Install and Configure the SNMP exporter
+
+1. Enable SNMP on the nas: Control Panel > Network & File Services > SNMP
+    1. enable SNMP
+    1. Choose SNMP v1/v2 (`snmp_exporter` default)
+    1. set Community string to `public` (`snmp_exporter` default)
+    1. Apply
+
+1. download the NAS MIB at the bottom of the same page as above (a copy of that file is available [here](NAS.mib), but prefer to redownload it)
+
+1. now we need to generate the correct QNAP configuration (probably easier on a separate linux box, not the nas):
+    1. follow [this doc](https://github.com/prometheus/snmp_exporter/tree/master/generator#building) to build the `generator`
+    1. `$ cp /path/to/NAS.mib mibs/`
+    1. replace the `generator.yml` content with (from [here](https://grafana.com/grafana/dashboards/9330)):
+        ```
+        modules:
+          qnap:
+            walk:
+              - cpuUsage
+              - systemCPU-UsageEX
+              - cpu-TemperatureEX
+              - systemTemperatureEX
+              - enclosureSystemTemp
+              - hdTemperatureEX
+              - diskSmartInfo
+              - ifPacketsReceivedEX
+              - ifPacketsSentEX
+              - sysVolumeTotalSizeEX
+              - sysVolumeFreeSizeEX
+              - systemTotalMemEX
+              - systemFreeMemEX
+              - availablePercent
+              - readHitRate
+              - writeHitRate
+        ```
+    1. run the commands [here](https://github.com/prometheus/snmp_exporter/tree/master/generator#running) to create `snmp.yml` (a copy of that file is available [here](snmp.yml), but prefer to regenerate it)
+
+1. Download `snmp_exporter`: from the project [release page](https://github.com/prometheus/snmp_exporter/releases), download the [latest binary release](https://github.com/prometheus/snmp_exporter/releases/download/v0.18.0/snmp_exporter-0.18.0.linux-amd64.tar.gz) (currently at version 0.18.0), for the right architecture (`amd64` most likely), and untar it in a directory on the nas
+
+1. copy `snmp.yml` created 2 steps above into the directory you installed `snmp_exporter`
+
+1. start the exporter: `./snmp_exporter`; a basic init script is available [here](SnmpExporter.sh), if you want to have it started at boot, run
+    ```
+    $ ln -s /etc/init.d/SnmpExporter.sh /etc/rcS.d/QS116SnmpExporter
+    ```
+
+1. add this scraper configuration to `prometheus.yml`
+    ```
+      - job_name: 'snmp_qnap'
+        scrape_interval: 1m
+        static_configs:
+        - targets:
+            - 127.0.0.1
+        metrics_path: /snmp
+        params:
+          module: [qnap]
+        relabel_configs:
+          - source_labels: [__address__]
+            target_label: __param_target
+          - source_labels: [__param_target]
+            target_label: instance
+          - target_label: __address__
+            replacement: 127.0.0.1:9116
+    ```
+   and restart prometheus; you can verify if it's working correctly in the Status > Targets page of prometheus (ipaddress:9090), or on the log for `snmp_exporter`.
+
+1. if you want you can now install [this](https://grafana.com/grafana/dashboards/9330) grafana dashboard (most of the configuration in the scraper/exporter are so that this dashboard works), set the _Device_ at the top-left to `127.0.0.1` and see if all works properly.
+
+
+there are probably a lot of other interesting nodes in that MIB (i mostly needed to graph the system temperature), but be careful: traversing those SNMP trees is not cheap nor fast, so be aware that: the more nodes you add, the slower the scraping will be (with the above setup, on my machine, the scrape duration for only this exporter is ~10 seconds).
+
+The exporter log (in debug mode) provides the timing it takes to retrieve every node, so you can use that to screen out things you dont need and speed up the process.
